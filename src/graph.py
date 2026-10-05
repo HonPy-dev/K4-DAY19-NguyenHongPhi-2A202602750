@@ -70,6 +70,103 @@ def find_substances(text: str) -> list[str]:
     return [name for name in SUBSTANCES if name.lower() in lowered]
 
 # ----------------------------------------------------------------------------------------------
+# Ontology v2 — structured thresholds + substance canonicalization (bonus, see report/ONTOLOGY.md)
+# ----------------------------------------------------------------------------------------------
+
+def _to_grams(number: str, unit: str) -> float:
+    """'9,6' + 'kg' -> 9600.0. Handles '1.000' thousand dots and ',' decimal comma."""
+    value = float(number.replace(".", "").replace(",", "."))
+    return value * 1000.0 if unit.startswith(("k", "K")) else value
+
+# Ordered: the "đến dưới" variant must win before the plain "đến" one.
+AMOUNT_RANGES = [
+    re.compile(r"từ\s+([\d.,]+)\s*(gam|kilôgam|kg)\s+đến\s+dưới\s+([\d.,]+)\s*(gam|kilôgam|kg)"),
+    re.compile(r"từ\s+([\d.,]+)\s*(gam|kilôgam|kg)\s+đến\s+([\d.,]+)\s*(gam|kilôgam|kg)"),
+    re.compile(r"([\d.,]+)\s*(gam|kilôgam|kg)\s+trở\s+lên"),
+    re.compile(r"dưới\s+([\d.,]+)\s*(gam|kilôgam|kg)"),
+]
+LAW_POINTS = re.compile(r"(?:^|(?<=\s))([abcdđeeghik])\)\s")
+AMOUNT_IN_TEXT = re.compile(r"([\d.,]+)\s*(kg|kilôgam|gam|gr|g)\b")
+CANONICAL_SUBSTANCES = {s.lower() for s in SUBSTANCES}
+SUBSTANCE_ALIASES = {
+    "thuốc lắc": "MDMA", "ma túy tổng hợp": "Methamphetamine", "ma túy đá": "Methamphetamine",
+    "đá": "Methamphetamine", "bóng": "Heroine", "hê rô-in": "Heroine", "hêrôin": "Heroine",
+    "coke": "Cocaine", "cỏ": "cần sa", " cần sa khô": "cần sa",
+}
+
+def substance_range(text: str) -> tuple[float, float] | None:
+    """'từ 05 gam đến dưới 30 gam' -> (5.0, 30.0); '100 gam trở lên' -> (100.0, None)."""
+    for pattern in AMOUNT_RANGES:
+        match = pattern.search(text)
+        if not match:
+            continue
+        groups = match.groups()
+        if len(groups) == 4:                                   # từ X ... đến (dưới) Y
+            return _to_grams(groups[0], groups[1]), _to_grams(groups[2], groups[3])
+        if "trở lên" in match.group(0):                        # X gam trở lên
+            return _to_grams(groups[0], groups[1]), None
+        return 0.0, _to_grams(groups[0], groups[1])            # dưới X gam
+    return None
+
+def parse_penalty_years(penalty: str) -> tuple[int | None, int | None]:
+    """'phạt tù từ 02 năm đến 07 năm' -> (2, 7); chung thân -> 99; tử hình -> 100 (numeric proxies)."""
+    span = re.search(r"từ\s+(\d+)\s+năm\s+đến\s+(\d+)\s+năm", penalty)
+    if span:
+        low, high = int(span.group(1)), int(span.group(2))
+    else:
+        single = re.search(r"(\d+)\s+năm", penalty)
+        low = int(single.group(1)) if single else None
+        high = low
+    if "tử hình" in penalty:
+        high = 100
+    elif "chung thân" in penalty:
+        high = 99
+    return low, high
+
+def clause_ranges(text: str) -> list[dict]:
+    """Per law point (điểm a), b)…): every substance mentioned with its numeric weight range.
+
+    Substances named in the same point as the range share it: 'Heroine, Cocaine, … MDMA hoặc
+    XLR-11 có khối lượng từ 05 gam đến dưới 30 gam'.
+    """
+    pieces = [(m.start(), m.group(1)) for m in LAW_POINTS.finditer(text)]
+    pieces.append((len(text), ""))
+    ranges = []
+    for index in range(len(pieces) - 1):
+        segment = text[pieces[index][0]:pieces[index + 1][0]]
+        span = substance_range(segment)
+        if not span:
+            continue
+        for name in find_substances(segment):
+            ranges.append({"substance": name, "min_g": span[0], "max_g": span[1]})
+    return ranges
+
+def normalize_substance(name: str) -> str:
+    return re.sub(r"\s+", " ", name.strip().strip("\"'“”").lower())
+
+def link_substance(name: str) -> str:
+    """Map a free-text substance mention onto a canonical name (alias first, then fuzzy)."""
+    target = normalize_substance(name)
+    if not target:
+        return name
+    for canonical in SUBSTANCES:
+        if normalize_substance(canonical) == target:
+            return canonical
+    if target in SUBSTANCE_ALIASES:
+        return SUBSTANCE_ALIASES[target]
+    close = difflib.get_close_matches(target, sorted(CANONICAL_SUBSTANCES), n=1, cutoff=0.8)
+    if close:
+        for canonical in SUBSTANCES:
+            if normalize_substance(canonical) == close[0]:
+                return canonical
+    return name                                              # unresolved — keep, but flag canonical=false
+
+def amount_in_grams(amount: str) -> float | None:
+    """'hơn 9,6 kg' -> 9600.0; 'khoảng 406 g' -> 406.0; '5 viên' -> None."""
+    match = AMOUNT_IN_TEXT.search((amount or "").lower())
+    return _to_grams(match.group(1), match.group(2)) if match else None
+
+# ----------------------------------------------------------------------------------------------
 # HINT — suggested ontology: extraction helpers
 # ----------------------------------------------------------------------------------------------
 
@@ -92,6 +189,9 @@ def parse_law_article(doc: Document) -> dict[str, Any]:
             "text": text,
             "substances": find_substances(text),
         })
+    for clause in clauses:
+        clause["penalty_min_years"], clause["penalty_max_years"] = parse_penalty_years(clause["penalty"])
+        clause["ranges"] = clause_ranges(clause["text"])
     return {
         "id": article_id,
         "law": doc.metadata.get("law", ""),
@@ -137,6 +237,11 @@ def extract_news_cases(doc: Document, llm_fn: Callable[[str], str], known_crimes
         case["charges"] = sorted({c for c in (link_entity(x, known_crimes) for x in case.get("charges", [])) if c})
         for person in case.get("people", []):
             person["charge"] = link_entity(person.get("charge") or "", known_crimes) or ""
+        for substance in case.get("substances", []):
+            linked = link_substance(substance.get("name") or "")
+            substance["name"] = linked
+            substance["canonical"] = linked.lower() in CANONICAL_SUBSTANCES
+            substance["amount_g"] = amount_in_grams(substance.get("amount") or "")
     return cases
 
 # ----------------------------------------------------------------------------------------------
@@ -223,9 +328,12 @@ class Neo4jGraph:
             WITH a
             UNWIND $clauses AS clause
             MERGE (cl:Clause {id: clause.id})
-              SET cl.number = clause.number, cl.penalty = clause.penalty, cl.text = clause.text, cl.doc_id = $doc_id
+              SET cl.number = clause.number, cl.penalty = clause.penalty, cl.text = clause.text, cl.doc_id = $doc_id,
+                  cl.penalty_min_years = clause.penalty_min_years, cl.penalty_max_years = clause.penalty_max_years
             MERGE (a)-[:HAS_CLAUSE]->(cl)
             FOREACH (s IN clause.substances | MERGE (sub:Substance {name: s}) MERGE (cl)-[:MENTIONS]->(sub))
+            FOREACH (r IN clause.ranges | MERGE (sub:Substance {name: r.substance})
+                MERGE (cl)-[at:APPLIES_TO]->(sub) SET at.min_g = r.min_g, at.max_g = r.max_g)
             """,
             **article,
         )
@@ -238,8 +346,9 @@ class Neo4jGraph:
             FOREACH (loc IN CASE WHEN $location = '' THEN [] ELSE [$location] END |
                 MERGE (l:Location {name: loc}) MERGE (k)-[:LOCATED_IN]->(l))
             FOREACH (crime IN $charges | MERGE (c:Crime {name: crime}) MERGE (k)-[:CHARGED_WITH]->(c))
-            FOREACH (s IN $substances | MERGE (sub:Substance {name: s.name}) MERGE (k)-[r:INVOLVES]->(sub)
-                SET r.amount = s.amount)
+            FOREACH (s IN $substances | MERGE (sub:Substance {name: s.name})
+                SET sub.canonical = s.canonical
+                MERGE (k)-[r:INVOLVES]->(sub) SET r.amount = s.amount, r.amount_g = s.amount_g)
             FOREACH (p IN $people | MERGE (person:Person {name: p.name})
                 SET person.aliases = coalesce(p.aliases, [])
                 MERGE (person)-[r:INVOLVED_IN]->(k) SET r.role = p.role, r.charge = p.charge, r.sentence = p.sentence)
@@ -254,8 +363,15 @@ class Neo4jGraph:
     # ---------------------------------------------------------------- KG-3
 
     def context(self, question: str, doc_ids: list[str], max_facts: int = 60) -> list[str]:
-        """Graph facts for a question: seeds + 1 hop, then the legal basis of every case reached."""
-        seed_ids, facts = self.seed_facts(question, doc_ids)
+        """Graph facts for a question: seeds + 1 hop, then the legal basis of every case reached.
+
+        v2 (own ontology): keeps only text-bearing facts when the budget is tight, matches case
+        amounts against structured APPLIES_TO thresholds, and answers "mức phạt tối đa" questions
+        by ranking clauses on penalty_max_years.
+        """
+        seed_ids, seed_edge_facts = self.seed_facts(question, doc_ids)
+        wants_max = bool(re.search(r"tối đa|cao nhất|nặng nhất|chung thân|tử hình", question.lower()))
+        facts: list[str] = []
 
         # Vụ việc là seed hoặc kề một seed (Person -> Case, ...)
         cases = self.run(
@@ -283,22 +399,73 @@ class Neo4jGraph:
             ids=case_ids,
         )
 
-        # Câu hỏi nhắc thẳng một Điều ("Điều 251") -> lấy khoản 1 + khoản nhắc chất có trong câu hỏi
-        for number in dict.fromkeys(re.findall(r"[Đđ]iều (\d+)", question)):
+        # v2: khớp ngưỡng bằng số — vụ INVOLVES amount_g nằm trong khoảng APPLIES_TO của khoản
+        thresholds = self.run(
+            """
+            MATCH (k:Case)-[inv:INVOLVES]->(s:Substance)<-[at:APPLIES_TO]-(cl:Clause)<-[:HAS_CLAUSE]-(a:Article)
+            WHERE elementId(k) IN $ids AND inv.amount_g IS NOT NULL
+              AND inv.amount_g >= at.min_g AND (at.max_g IS NULL OR inv.amount_g < at.max_g)
+            RETURN a.id AS article, a.title AS title, cl.number AS number, cl.text AS text,
+                   s.name AS substance, inv.amount AS amount, inv.amount_g AS amount_g,
+                   at.min_g AS min_g, at.max_g AS max_g
+            ORDER BY article, number
+            """,
+            ids=case_ids,
+        )
+
+        # v2: câu hỏi về mức phạt tối đa -> khoản có khung cao nhất của từng Điều đi tới được
+        if wants_max:
             clauses += self.run(
                 """
-                MATCH (a:Article)-[:HAS_CLAUSE]->(cl:Clause)
-                WHERE a.id STARTS WITH ($prefix + ' ')
-                  AND (cl.number = 1 OR EXISTS {
-                        MATCH (cl)-[:MENTIONS]->(s:Substance) WHERE s.name IN $subs })
+                MATCH (k:Case)-[:CHARGED_WITH]->(:Crime)<-[:DEFINES]-(a:Article)-[:HAS_CLAUSE]->(cl:Clause)
+                WHERE elementId(k) IN $ids AND cl.penalty_max_years IS NOT NULL
+                WITH a, cl ORDER BY cl.penalty_max_years DESC
+                WITH a, collect(cl)[..1] AS top
+                UNWIND top AS cl
                 RETURN a.id AS article, a.title AS title, cl.number AS number, cl.text AS text
-                ORDER BY article, number
                 """,
-                prefix=f"Điều {number}", subs=find_substances(question),
+                ids=case_ids,
             )
+
+        # Câu hỏi nhắc thẳng một Điều ("Điều 251") -> lấy khoản 1 + khoản nhắc chất có trong câu hỏi;
+        # nếu hỏi mức tối đa thì lấy khoản có khung cao nhất của Điều đó.
+        for number in dict.fromkeys(re.findall(r"[Đđ]iều (\d+)", question)):
+            if wants_max:
+                rows = self.run(
+                    """
+                    MATCH (a:Article)-[:HAS_CLAUSE]->(cl:Clause)
+                    WHERE a.id STARTS WITH ($prefix + ' ') AND cl.penalty_max_years IS NOT NULL
+                    WITH a, cl ORDER BY cl.penalty_max_years DESC
+                    WITH a, collect(cl)[..1] AS top UNWIND top AS cl
+                    RETURN a.id AS article, a.title AS title, cl.number AS number, cl.text AS text
+                    """,
+                    prefix=f"Điều {number}",
+                )
+            else:
+                rows = self.run(
+                    """
+                    MATCH (a:Article)-[:HAS_CLAUSE]->(cl:Clause)
+                    WHERE a.id STARTS WITH ($prefix + ' ')
+                      AND (cl.number = 1 OR EXISTS {
+                            MATCH (cl)-[:MENTIONS]->(s:Substance) WHERE s.name IN $subs })
+                    RETURN a.id AS article, a.title AS title, cl.number AS number, cl.text AS text
+                    ORDER BY article, number
+                    """,
+                    prefix=f"Điều {number}", subs=find_substances(question),
+                )
+            clauses += rows
 
         for row in clauses:
             facts.append(f"[{row['article']} - {row['title']}] khoản {row['number']}: {row['text']}")
+        for row in thresholds:
+            span = (f"từ {row['min_g']:.0f} gam"
+                    if row["max_g"] is None else f"từ {row['min_g']:.0f} đến dưới {row['max_g']:.0f} gam")
+            facts.append(f"[{row['article']}] vụ '{row['amount']}' {row['substance']} ≈ {row['amount_g']:.0f} gam "
+                         f"→ rơi vào ngưỡng {span} của khoản {row['number']}")
+
+        # Ưu tiên dữ kiện có nội dung (vụ + khoản luật + ngưỡng) trước các cạnh chỉ có tên;
+        # khi vượt max_facts thì cắt phần cạnh seed ở cuối, không cắt text khoản luật.
+        facts += seed_edge_facts
         return list(dict.fromkeys(facts))[:max_facts]
 
 # ---------------------------------------------------------------------------------------------- KG-2

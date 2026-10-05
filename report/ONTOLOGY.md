@@ -3,10 +3,10 @@
 **Họ tên:** Nguyễn Hồng Phi  **MSSV:** 2A202602750
 
 **Lựa chọn** (đánh dấu một):
-- [x] Dùng ontology gợi ý (có thể chỉnh nhỏ)
-- [ ] Tự thiết kế (xét bonus +15, xem `SUBMISSION.md`)
+- [ ] Dùng ontology gợi ý (có thể chỉnh nhỏ)
+- [x] Tự thiết kế (xét bonus +15, xem `SUBMISSION.md`)
 
-> Tôi đi con đường ontology gợi ý (các hàm HINT trong `src/graph.py`) vì vòng đời tội danh là một tập đóng, nhỏ (13 tội trong Chương XX BLHS), rất phù hợp làm node cầu nối; các hàm trích xuất regex cho luật cũng tận dụng được trọn vẹn. Mọi nội dung dưới đây được tôi viết lại bằng lời của mình và **khớp với graph thật** đang có trong Neo4j: 202 node (Article 18, Clause 99, Crime 13, Substance 17, Case 16, Person 32, Location 7) và 379 cạnh (MENTIONS 169, HAS_CLAUSE 99, INVOLVED_IN 40, INVOLVES 25, CHARGED_WITH 19, LOCATED_IN 14, DEFINES 13) — đã đối chiếu với ảnh `report/img/kg_count.png`.
+> Xuất phát từ ontology gợi ý, tôi **sửa lại có chủ đích 4 điểm** sau khi hoàn thành lab trên ontology gợi ý và tự tìm thấy lỗi của nó (chi tiết và bằng chứng trước/sau ở mục 7, đầy đủ hơn ở `REPORT_KG.md` mục 3). Sản phẩm chạy được toàn bộ: code trong `src/graph.py`, graph thật trong Neo4j (199 nodes / 529 cạnh), `--check` đủ `[OK]`, benchmark đầy đủ trong `ket_qua_benchmark_kg.txt`; kết quả của ontology gợi ý để so sánh ở `ket_qua_benchmark_kg.hint.txt`.
 
 ## 1. Sơ đồ
 
@@ -14,33 +14,35 @@
 flowchart LR
     subgraph News["KB tin tức (trích bằng LLM)"]
       P[Person] -- "INVOLVED_IN<br/>role, charge, sentence" --> K[Case]
-      K -- "INVOLVES<br/>amount" --> S[Substance]
+      K -- "INVOLVES<br/>amount, amount_g" --> S[Substance]
       K -- LOCATED_IN --> L[Location]
     end
     K -- CHARGED_WITH --> C((Crime))
     subgraph Law["KB luật (trích bằng regex)"]
-      A[Article] -- HAS_CLAUSE --> CL["Clause<br/>number, penalty, text"]
+      A[Article] -- HAS_CLAUSE --> CL["Clause<br/>number, penalty,<br/>penalty_min/max_years, text"]
       CL -- MENTIONS --> S
+      CL -- "APPLIES_TO<br/>min_g, max_g" --> S
     end
     A -- DEFINES --> C
     style C fill:#f9d71c,color:#000
+    style CL fill:#b8e0ff,color:#000
 ```
 
-**Node cầu nối là `Crime`** (vòng tròn vàng): luật định nghĩa tội qua `DEFINES`, vụ án trong tin bị truy tố "tội đó" qua `CHARGED_WITH`.
+**Node cầu nối vẫn là `Crime`**; phần tự thiết kế nằm ở **`Clause`** (node được tô xanh): thay vì giữ ngưỡng khối lượng dưới dạng chữ trong `text`, tôi tách thành **cạnh `APPLIES_TO {min_g, max_g}` có khoảng số**, và thêm **`penalty_min_years/penalty_max_years`** cho khung hình phạt.
 
 ## 2. Entity types (node labels)
 
 | Label | Ý nghĩa | Khóa định danh (`MERGE` theo) | Properties | Lấy từ KB nào | Trích bằng (regex / LLM / khác) |
 | --- | --- | --- | --- | --- | --- |
-| `Article` | Một Điều luật | `id` ("Điều 251 BLHS", "Điều 2 Luật PCMT") | id, title, law, doc_id | Luật | Regex (front-matter + tiêu đề) |
-| `Clause` | Một khoản của Điều | `id` ("Điều 251 BLHS khoản 1") | id, number, penalty, text, doc_id | Luật | Regex (tách theo `^1. `…) |
-| `Crime` | **Tội danh chuẩn — node cầu nối** | `name` (đã chuẩn hóa, vd "mua bán trái phép chất ma túy") | name | Cả hai | Luật: regex từ tiêu đề "Tội …"; tin: LLM rồi `link_entity` về tên chuẩn |
-| `Substance` | Chất ma túy | `name` (danh sách chuẩn `SUBSTANCES` + tên LLM tự đặt) | name | Cả hai | Luật: regex (`find_substances`); tin: LLM |
-| `Case` | Một vụ việc trong tin | `name` (LLM đặt, fallback = tiêu đề bài) | name, summary, date, doc_id, source_title | Tin | LLM |
-| `Person` | Người trong vụ án | `name` (+ `aliases` để bắt biệt danh như "Hoàng Nato") | name, aliases | Tin | LLM |
+| `Article` | Một Điều luật | `id` ("Điều 251 BLHS") | id, title, law, doc_id | Luật | Regex |
+| `Clause` | Một khoản luật, **có cấu trúc hóa ngưỡng + khung phạt** | `id` ("Điều 250 BLHS khoản 4") | id, number, penalty, **penalty_min_years, penalty_max_years**, text, doc_id | Luật | Regex (tách khoản, parse khung phạt và khoảng gam) |
+| `Crime` | **Tội danh chuẩn — node cầu nối** | `name` chuẩn hóa | name | Cả hai | Luật: regex từ tiêu đề; tin: LLM + `link_entity` |
+| `Substance` | Chất ma túy, **có cờ `canonical`** | `name` | name, **canonical** (true/false, null = từ phía luật) | Cả hai | Luật: regex; tin: LLM → `link_substance` (alias + fuzzy) |
+| `Case` | Vụ việc trong tin | `name` (LLM đặt, fallback tiêu đề) | name, summary, date, doc_id, source_title | Tin | LLM |
+| `Person` | Người trong vụ án | `name` (+ `aliases` bắt biệt danh) | name, aliases | Tin | LLM |
 | `Location` | Tỉnh/thành phố | `name` | name | Tin | LLM |
 
-Vì sao khóa là `name`/`id`: đây là các "thứ của thế giới thực" xuất hiện ở nhiều tài liệu; `MERGE` theo khóa giúp cùng một tội/chất/người từ nhiều bài gom về một node. Node sinh ra từ **một** tài liệu duy nhất (Article, Clause, Case) mang thêm `doc_id` theo hợp đồng của lab; các node dùng chung (Crime, Substance, Person, Location) cố tình không gắn `doc_id` vì thuộc nhiều tài liệu cùng lúc.
+`doc_id` gắn cho node sinh từ **một** tài liệu (Article, Clause, Case); Crime, Substance, Person, Location dùng chung nhiều tài liệu nên không có — đúng hợp đồng của lab (node luật/tin vẫn có `doc_id` để nối chunk vector).
 
 ## 3. Relationships
 
@@ -48,47 +50,54 @@ Vì sao khóa là `name`/`id`: đây là các "thứ của thế giới thực" 
 | --- | --- | --- | --- |
 | `DEFINES` | Article → Crime | — | Điều luật định nghĩa tội danh |
 | `HAS_CLAUSE` | Article → Clause | — | Điều gồm các khoản |
-| `MENTIONS` | Clause → Substance | — | Khoản luật liệt kê chất với ngưỡng khối lượng (vd "MDMA … 100 gam trở lên") |
-| `CHARGED_WITH` | Case → Crime | — | Vụ án bị truy tố/bắt về tội gì — **cạnh cầu nối từ tin sang luật** |
-| `INVOLVED_IN` | Person → Case | role, charge, sentence | Ai liên quan vụ nào, vai trò, tội danh riêng, mức án |
-| `INVOLVES` | Case → Substance | amount | Vụ án liên quan chất gì, khối lượng bao nhiêu |
+| `MENTIONS` | Clause → Substance | — | Khoản nhắc tới chất (không kèm ngưỡng, vd khoản 1 liệt kê chất của khung cơ bản) |
+| **`APPLIES_TO`** | Clause → Substance | **min_g, max_g (số, gam; max_g null = "trở lên")** | **Ngưỡng khối lượng làm khoản đó tăng khung** — tách từ text luật bằng regex, vd khoản 4 Điều 250: MDMA min_g=100 |
+| `CHARGED_WITH` | Case → Crime | — | Vụ án bị truy tố/bắt về tội gì — cạnh cầu nối |
+| `INVOLVED_IN` | Person → Case | role, charge, sentence | Ai liên quan vụ nào, vai trò, tội danh, mức án |
+| `INVOLVES` | Case → Substance | amount, **amount_g (số, gam)** | Vụ liên quan chất gì, khối lượng (chuỗi gốc + số chuẩn hóa) |
 | `LOCATED_IN` | Case → Location | — | Vụ xảy ra ở đâu |
 
 ## 4. Node cầu nối giữa 2 KB
 
-- **Node nào:** `Crime`, qua hai cạnh `CHARGED_WITH` (từ tin) và `DEFINES` (từ luật).
-- **Vì sao chọn node này:** tội danh là thuộc tính **bắt buộc phải có ở cả hai phía** — một Điều trong Chương XX luôn định nghĩa đúng một tội (regex lấy được 100%, deterministic), còn một vụ án tin tức hầu như luôn nêu tội danh. Quan trọng hơn, tập tên tội là **tập đóng, nhỏ (13 tên)** nên chuẩn hóa được gần như tuyệt đối; trong khi nếu lấy `Substance` làm cầu nối thì tên chất trong báo chí rất lộn (biệt danh, tên lóng), tỉ lệ khớp thấp.
-- **Cách đảm bảo hai phía khớp tên:** (1) phía luật, tên tội lấy thẳng từ tiêu đề "Tội X" rồi đưa qua `normalize_crime` (chữ thường, bỏ tiền tố "tội", gọn khoảng trắng) — đây là **bộ tên chuẩn**; (2) prompt LLM được nhúng sẵn DANH SÁCH TỘI DANH và bắt buộc chọn nguyên văn; (3) dù vậy, output LLM vẫn được ép qua `link_entity` lần nữa: chuẩn hóa cả hai phía → khớp chính xác → không thì `difflib.get_close_matches` với cutoff 0.8 (bắt được biến thể "ma tuý"/"ma túy") → vẫn không giống thì trả `None`, **không nối bừa**.
-- **Khi nào cầu gãy, và bạn xử lý thế nào:** gãy khi (a) bài tin không nêu tội danh đúng nghĩa (bài "phát hiện nghi vấn", bài rửa tiền cho băng đảng Sinaloa — tội không nằm trong Chương XX) → `link_entity` trả None, Case không có cạnh `CHARGED_WITH`, đúng ra **không nên** nối; (b) LLM đặt tội danh quá lệch so với danh sách chuẩn → bị rớt ở cutoff 0.8. Cách xử lý hiện tại là chấp nhận gãy có kiểm soát (an toàn hơn nối sai) và đưa vào danh sách chuẩn các biến thể thường gặp; trong graph thật có 5/16 Case không nối được sang luật (soi thêm ở REPORT_KG.md mục 3, lỗi E1).
+- **Node nào:** `Crime` (giữ nguyên từ gợi ý — đây là lựa chọn đúng nên không đổi).
+- **Vì sao:** tội danh tồn tại bắt buộc ở cả hai phía, và là tập đóng nhỏ (13 tên) chuẩn hóa được gần tuyệt đối bằng regex phía luật + `link_entity` (chuẩn hóa → khớp chính xác → difflib cutoff 0.8 → None nếu không giống) phía tin. Chất ma túy thì tên gọi trong báo chí rất lộn, không đáng tin làm cầu.
+- **Cách đảm bảo hai phía khớp tên:** phía luật 100% regex từ tiêu đề "Tội X"; prompt LLM được nhúng danh sách 13 tội chuẩn và bị bắt buộc chọn nguyên văn; output vẫn ép qua `link_entity` lần nữa. V2 bổ sung: chất ma túy cũng được ép qua `link_substance` (alias "thuốc lắc"→MDMA, "ma túy đá/tổng hợp"→Methamphetamine… rồi mới fuzzy), chất nào không khớp thì vẫn tạo node nhưng gắn `canonical=false` để **phân biệt được** với chất chuẩn thay vì trộn lẫn.
+- **Khi nào cầu gãy, và bạn xử lý thế nào:** bài tin không nêu tội danh thuộc Chương XX (rửa tiền cho băng đảng Sinaloa, "phát hiện nghi vấn" chưa khởi tố) → `link_entity` trả None, Case không nối sang luật — chấp nhận gãy có kiểm soát vì nối sai còn tệ hơn. Cầu bằng chất là đường phụ (Case–INVOLVES–Substance–MENTIONS–Clause) và v2 làm nó đáng tin hơn nhờ canonical hóa.
 
 ## 5. Competency questions
 
-Đường đi trên graph cho từng câu trong `data/benchmark_kg.json`:
-
 | Câu | Đường đi (Cypher pattern) | Trả lời được? |
 | --- | --- | --- |
-| Q1 | (chunk của `pcmt-dieu-2` qua vector search) → `(:Article {id:'Điều 2 Luật PCMT'})-[:HAS_CLAUSE]->(:Clause {number:4})`, định nghĩa "tiền chất" nằm trong `Clause.text` | Được — text khoản luật có sẵn định nghĩa; GraphRAG còn trích dẫn đúng "khoản 4 Điều 2 Luật PCMT" (judge = 2) |
-| Q2 | `(:Person)-[r:INVOLVED_IN {sentence:'tử hình'}]->(:Case {name:'Vụ mua bán hơn 36kg ma túy tại TP.HCM'})` trả về Trần Thanh Tuấn, Trần Minh Tâm | Được (judge = 2) |
-| Q3 | `(:Person {name:'Lê Minh Thành'})-[:INVOLVED_IN {sentence:'36 tháng tù'}]->(:Case)-[:CHARGED_WITH]->(:Crime)<-[:DEFINES]-(:Article {id:'Điều 251 BLHS'})-[:HAS_CLAUSE]->(:Clause {number:1, penalty:'phạt tù từ 02 năm đến 07 năm'})` | Được — chính là đường xuyên 2 KB; Flat RAG không trả lời được (recall 0.00), GraphRAG judge = 2 |
-| Q4 | `(:Person {aliases:['Hoàng Nato']})-[:INVOLVED_IN]->(:Case)-[:CHARGED_WITH]->(:Crime {name:'tổ chức sử dụng trái phép chất ma túy'})<-[:DEFINES]-(:Article {id:'Điều 255 BLHS'})-[:HAS_CLAUSE]->(:Clause)` | **Một phần.** Đi được tới Điều 255 và khoản 1, nhưng khoản 4 ("tù 20 năm hoặc tù chung thân") bị bộ lọc khoản bỏ sót vì Điều 255 không nhắc chất cụ thể nào (chi tiết: REPORT_KG.md lỗi E2) |
-| Q5 | `(:Person {name:'Cái Quang Huy'})-[:INVOLVED_IN]->(:Case)-[:INVOLVES {amount:'hơn 9,6 kg'}]->(:Substance {name:'MDMA'})` và `(Case)-[:CHARGED_WITH]->(:Crime)<-[:DEFINES]-(:Article {id:'Điều 250 BLHS'})-[:HAS_CLAUSE]->(:Clause {number:4})-[:MENTIONS]->(:Substance {name:'MDMA'})` | Được — khoản 4 được giữ nhờ điều kiện "khoản MENTIONS chất mà vụ INVOLVES"; judge = 2 |
-| Q6 | `(Case)-[:INVOLVES]->(:Substance {name:'MDMA'})` — liệt kê Case kề node chất | **Một phần.** Các vụ mà LLM trích chất đúng tên "MDMA" gom về một node nên liệt kê được; nhưng các vụ bị trích thành "ma túy tổng hợp", "thuốc lắc"… tạo node Substance riêng, không gộp được (chi tiết: lỗi E3) |
+| Q1 | (chunk `pcmt-dieu-2` từ vector search) → `(:Article {id:'Điều 2 Luật PCMT'})-[:HAS_CLAUSE]->(:Clause {number:4})` | Được (judge 2) |
+| Q2 | `(:Person)-[:INVOLVED_IN {sentence:'tử hình'}]->(:Case)` | Được (judge 2) |
+| Q3 | `(:Person {name:'Lê Minh Thành'})-[:INVOLVED_IN {sentence:'36 tháng tù'}]->(:Case)-[:CHARGED_WITH]->(:Crime)<-[:DEFINES]-(:Article {id:'Điều 251 BLHS'})-[:HAS_CLAUSE]->(:Clause {number:1})` | Được (judge 2; Flat 0) |
+| Q4 | Đường như Q3 tới `(:Article {id:'Điều 255 BLHS'})`, rồi **quy tắc mới: câu hỏi chứa "tối đa" → `RETURN top 1 Clause ORDER BY penalty_max_years DESC`** → khoản 4 ("tù chung thân") | **Được** — ontology gợi ý trả sai (bỏ sót khoản 4, recall 0.00, judge 0); v2 recall 1.00, judge 2 |
+| Q5 | `(:Case)-[:INVOLVES {amount_g:9600}]->(:Substance {name:'MDMA'})<-[:APPLIES_TO {min_g:100}]-(:Clause {number:4})` — **so khoảng số trực tiếp trên graph** | **Được, không cần LLM đọc text** — khoản 4 được chọn bằng phép so `9600 >= min_g AND (max_g IS NULL)`, và ngữ cảnh có cả dòng giải thích ngưỡng (judge 2) |
+| Q6 | `(Case)-[:INVOLVES]->(:Substance {name:'MDMA'})` | Được — recall 1.00 (đủ 3 tên trong gold) nhờ các vụ "thuốc lắc"/"MDMA" gom về đúng node MDMA; judge 1 vì câu trả lời liệt kê dư 1 vụ trùng |
 
 ## 6. Quyết định thiết kế và đánh đổi
 
-1. **Mức án là property `sentence` trên cạnh `INVOLVED_IN`, không tách thành node `Penalty`.** Phương án khác: node Penalty nối tới Person/Case, query được "liệt kê mọi mức án đã tuyên". Tôi chọn property vì benchmark chỉ hỏi mức án của một người cụ thể; tách node làm graph phình thêm ~40 node + 40 cạnh và prompt dài hơn khi không cần. Đổi lại, không so sánh/truy vấn tập hợp mức án được trọn vẹn.
-2. **Tách `Clause` thành node riêng thay vì giữ nguyên văn cả Điều trên `Article`.** Phương án khác: chỉ node Article mang full text — graph nhỏ hơn nhiều (bớt 99 node), prompt ngắn hơn. Tôi chọn tách khoản vì câu hỏi loại cross-kb đều quy về **khung hình phạt theo khoản** (Q5 cần đúng khoản 4 theo khối lượng MDMA); không tách khoản thì không lọc được, hoặc phải nhồi cả Điều dài vào prompt mỗi lần.
-3. **Cầu nối là `Crime`, không phải `Substance`.** Phương án khác và vì sao không: xem mục 4 — tập tội danh đóng, chuẩn hóa được gần tuyệt đối; tên chất trong tin tức là "đại dương tên gọi" (`ma túy tổng hợp`, `thuốc lắc`, `Tinh thể rắn màu trắng nghi là chất ma túy`…) nên nếu lấy chất làm cầu nối thì tỉ lệ gãy rất cao. Đánh đổi: các câu hỏi đi bằng chất (Q6) phụ thuộc vào việc LLM trích đúng tên chuẩn, không còn bảo đảm bởi cơ chế cầu nối.
-4. **Luật trích bằng regex, tin trích bằng LLM.** Văn bản luật cực đều (Điều → khoản → điểm, mẫu câu "thì bị phạt tù từ … đến …") nên regex rẻ, nhanh, chạy 100 lần ra một kết quả; tin tức là văn xuôi tự do nên bắt buộc LLM. Đánh đổi: phần LLM (~0,01 USD/lần dựng, không ổn định hoàn toàn giữa các lần chạy) là nguồn chính của các lỗi trùng/lech thực thể ở mục 3 báo cáo.
+1. **Ngưỡng khối lượng thành cạnh `APPLIES_TO {min_g, max_g}` (số), không để dạng chữ trong `text`.** Phương án khác: giữ nguyên như gợi ý (chữ) và để LLM tự đọc text khoản. Tôi tách bằng regex vì text luật cực đều ("từ X gam đến dưới Y gam", "X gam trở lên") — 220 khoảng từ 18 điều, chi phí bằng 0; đổi lại KG-3 trả lời Q5 kiểu số `amount_g ≥ min_g` ngay trên graph. Đánh đổi: parser chỉ hiểu được các mẫu khoảng chuẩn, các trường hợp chữ kiểu "nhiều lần hơn khung thấp nhất" không tách được.
+2. **`penalty_min_years/penalty_max_years` với quy ước chung thân=99, tử hình=100.** Phương án khác: không mô hình hóa, hoặc dùng node Penalty riêng. Tôi chọn property số trên Clause để có thể `ORDER BY penalty_max_years DESC` — điều khoản nào khung cao nhất là một phép sort, mở đường trả lời mọi câu "mức tối đa" (Q4). Đánh đổi: 99/100 là proxy quy ước (ghi rõ ở đây), không dùng để tính toán pháp lý thật.
+3. **Chất trích từ tin ép qua `link_substance` (alias + fuzzy) và gắn cờ `canonical`.** Phương án khác: tin getName gì tạo node đó (gợi ý), hoặc gạch hẳn chất không khớp. Tôi chọn gộp những cái có alias đã biết (thuốc lắc→MDMA…) và **giữ + đánh dấu** cái không khớp (`canonical=false`: "etomidate", "nước vui"…) vì xóa bỏ mất thông tin (bài pod chill quả thật là etomidate — chất ngoài danh mục luật), trong khi cờ giúp truy vấn phân biệt `MATCH (s:Substance {canonical: false})` — trước đây không phân biệt được.
+4. **Thứ tự ngữ cảnh trong KG-3: dữ kiện có nội dung (tóm tắt vụ, text khoản, ngưỡng) đứng trước, cạnh chỉ-tên đứng cuối và bị cắt trước khi vượt `max_facts`.** Phương án khác: giữ thứ tự gợi ý (seed 1-hop trước). Tôi đảo vì trên ontology gợi ý, 60 cạnh tên từ 3 điều luật từng chiếm sạch `max_facts=60` và đẩy Điều 255 ra khỏi prompt (E2, bằng chứng ở REPORT mục 3); đảo thứ tự là sửa 1 dòng, không tốn thêm token.
+5. **Luật regex — tin LLM (giữ như gợi ý).** Văn bản luật đều và deterministic; tin là văn xuôi. Đánh đổi: toàn bộ lỗi trùng/lệch thực thể dồn về phía LLM, nên v2 mới cần canonical hóa chất (quyết định 3).
 
 ## 7. So với ontology gợi ý (bắt buộc nếu xét bonus)
 
-Không xét bonus — dùng nguyên ontology gợi ý, không có thay đổi cấu trúc nào so với phần HINT trong `src/graph.py`.
+| Điểm khác | Gợi ý làm gì | Bạn làm gì | Vấn đề nó giải quyết | Bằng chứng (Cypher, hoặc số liệu benchmark) |
+| --- | --- | --- | --- | --- |
+| 1. Ngưỡng khối lượng `APPLIES_TO {min_g, max_g}` + `INVOLVES.amount_g` | Ngưỡng nằm lẫn trong `Clause.text` dạng chữ; việc chọn khoản theo khối lượng phó thác cho LLM đọc text khi sinh câu trả lời | Regex tách khoảng gam từ text luật (220 cạnh từ 18 điều, 0 token) và chuẩn hóa `amount` chuỗi thành `amount_g` số ("hơn 9,6 kg"→9600.0); KG-3 khớp khoản bằng `amount_g >= min_g AND (max_g IS NULL OR amount_g < max_g)` và sinh dòng giải thích ngưỡng | Câu cross-kb-multi-hop theo khối lượng (Q5) chọn được khoản **bằng số trên graph**, không phụ thuộc LLM tự đọc; đường đi minh bạch, kiểm chứng được | Trước (hint): Q5 đúng nhưng chỉ nhờ LLM trích cả chunk luật. Sau (v2): `MATCH (k)-[:INVOLVES]->(s)<-[:APPLIES_TO {min_g:100}]-(:Clause {number:4})` trúng khoản 4 Điều 250 cho amount_g=9600; câu trả lời Q5 v2 dẫn "thuộc ngưỡng **100 g trở lên** tại **điểm b khoản 4 Điều 250**" — recall 1.00, judge 2 |
+| 2. `Clause.penalty_min_years / penalty_max_years` (chung thân=99, tử hình=100) | Không có; mọi khoản ngang giá trị | Regex parse khung phạt thành khoảng năm (53/99 khoản có giá trị); khi câu hỏi chứa "tối đa/cao nhất/chung thân/tử hình", KG-3 lấy `top 1 Clause ORDER BY penalty_max_years DESC` của từng Điều đi tới được | Sửa đúng lỗi E2: câu hỏi mức phạt tối đa (Q4) trước đây chỉ lấy được khoản 1 vì bộ lọc "khoản 1 hoặc khoản nhắc chất" bỏ sót khoản 4 (Điều 255 không nhắc chất nào) | Trước: Q4 recall 0.00 / judge 0 (`ket_qua_benchmark_kg.hint.txt`: "graph chỉ nêu Điều 249 và Điều 250… không liên hệ Hoàng Nato"). Sau: Q4 recall **1.00** / judge **2** — trả lời "Mức cao nhất của Điều 255 là **tù chung thân** theo khoản 4" (`ket_qua_benchmark_kg.txt`) |
+| 3. Chất tin tức qua `link_substance` (alias + fuzzy) + cờ `Substance.canonical` | Tên chất LLM viết gì thì `MERGE` node đó — "thuốc lắc", "ma túy tổng hợp" thành node riêng, không gộp, không phân biệt với chất chuẩn | Alias map + `link_substance` gộp về tên chuẩn; không gộp được thì giữ node nhưng `canonical=false` | Giảm trùng thực thể (E3) và **truy vấn được** nhóm chất chưa chuẩn hóa thay vì trộn lẫn | Trước: 17 Substance, gồm 'thuốc lắc', 'ma túy tổng hợp', 'ma túy tổng hợp các loại', 'Chất ma túy nghi vấn'… không gì phân biệt được. Sau: 15 Substance; `thuốc lắc`/`ma túy đá` đã gộp về MDMA/Methamphetamine; `MATCH (s:Substance {canonical:false})` trả về đúng các node chưa chuẩn ('etomidate', 'nước vui', 'ma túy các loại'…) |
+| 4. Thứ tự ngữ cảnh KG-3: text khoản trước, cạnh seed sau | `seed_facts` (cạnh 1-hop chỉ có tên) đứng đầu, dễ chiếm hết `max_facts=60` | Ghép lại: tóm tắt vụ → text khoản → ngưỡng → cạnh seed; cắt phần cạnh seed khi tràn | Đúng lỗi "tràn max_facts" của E2: khi vector search trả toàn chunk luật, 60 cạnh tên từng đẩy mọi text khoản ra khỏi prompt | Trước (hint): tái lập `context()` cho Q4 với doc_ids luật → 60 facts toàn cạnh tên, 0 text khoản. Sau (v2): cùng truy vấn → 60 facts bắt đầu bằng tóm tắt vụ + text khoản 1–4 của Điều 249/251/255, có "chung thân" |
+
+**Ontology mới trả lời được câu mà gợi ý trả lời sai/thiếu:** Q4 (mức phạt tối đa — gợi ý sai hoàn toàn, v2 đúng đủ); Q5 (gợi ý đúng "may mắn" nhờ LLM, v2 đúng bằng suy luận số trên graph — minh bạch và kiểm chứng được).
 
 ## 8. Hạn chế còn lại
 
-- **Định danh theo tên do LLM tự đặt** (`Case`, `Person`): cùng một sự kiện ngoài đời có thể thành 2 node (graph thật đã có "Vụ phát hiện bao tải… ngày 27-9" và "… ngày 25-9" sinh từ cùng một bài — xem E3). Khóa ổn định hơn cần nguồn ngoài văn bản (số vụ án, CCCD) mà KB không có.
-- **`Substance` không gộp tên đồng nghĩa** ("thuốc lắc" ≈ MDMA/Amphetamine) và một số node là mô tả rác ("Chất ma túy nghi vấn").
-- **Ngưỡng khối lượng không được mô hình hóa**: `INVOLVES.amount` là chuỗi ("hơn 9,6 kg"), còn ngưỡng nằm lẫn trong `Clause.text` ("100 gam trở lên") — hệ thống không tự so sánh được, phải nhờ LLM đọc text (và nhờ vậy Q5 mới đúng, nhưng đây là "lơi" của thiết kế).
-- **Không phân biệt giai đoạn tố tụng** (bắt / khởi tố / truy tố / xét xử) — `role` và `charge` ghi lẫn cả nghi phạm chưa xét xử lẫn bị cáo đã tuyên án, nên cạnh `charge`/`sentence` rỗng ở một số vụ (E6).
-- `Crime`, `Substance`, `Person`, `Location` không có `doc_id` (cố ý, vì dùng chung), nên không lần ra nguồn tài liệu trực tiếp từ node này.
+- `Case`, `Person` vẫn khóa theo tên LLM tự đặt: cùng một sự kiện có thể thành 2 node (đã thấy 2 Case "Phú Quốc ngày 25-9/27-9" từ cùng một bài). Khóa ổn định cần số vụ án/CCCD — KB không có; hướng sửa là khử trùng lặp theo `doc_id` + so summary.
+- Parser ngưỡng chỉ hiểu các mẫu khoảng chuẩn trong BLHS Chương XX; ngưỡng dạng chữ khác ("nhiều lần hơn khung thấp nhất") không tách được.
+- Proxy chung thân=99/tử hình=100 chỉ phục vụ xếp hạng, không phải giá trị pháp lý.
+- Vẫn phụ thuộc LLM phía tin tức: 2 lần chạy v2 cho số node lệch nhẹ (203 vs 199) do tên Case/Person do LLM đặt; cờ `canonical` giảm hậu quả nhưng không eliminare.
+- Giai đoạn tố tụng (bắt/khởi tố/truy tố/xét xử) chưa mô hình hóa — `role`/`charge`/`sentence` vẫn ghi lẫn các giai đoạn.
