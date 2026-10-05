@@ -18,19 +18,24 @@ from dataclasses import dataclass, fields
 from typing import Any
 
 PROVIDERS = {
+    "openrouter": {"key": "OPENROUTER_API_KEY", "base_url": "https://openrouter.ai/api/v1",
+                   "chat": "openai/gpt-6-luna", "embed": "openai/text-embedding-3-small"},
     "openai": {"key": "OPENAI_API_KEY", "base_url": None,
                "chat": "gpt-4o-mini", "embed": "text-embedding-3-small"},
-    "openrouter": {"key": "OPENROUTER_API_KEY", "base_url": "https://openrouter.ai/api/v1",
-                   "chat": "openai/gpt-4o-mini", "embed": "openai/text-embedding-3-small"},
     "gemini": {"key": "GEMINI_API_KEY", "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
                "chat": "gemini-2.5-flash-lite", "embed": "gemini-embedding-001"},
     "anthropic": {"key": "ANTHROPIC_API_KEY", "base_url": None,
                   "chat": "claude-opus-5-5", "embed": None},
 }
-PROVIDER_ORDER = ["openai", "openrouter", "gemini", "anthropic"]
+PROVIDER_ORDER = ["openrouter", "openai", "gemini", "anthropic"]
 
 # USD per 1M tokens (input, output). Check each provider's pricing page before reporting real numbers.
 PRICES_PER_M = {
+    "gpt-6-luna": (0.10, 0.50),
+    "gpt-6-luna-pro": (0.10, 0.50),
+    "gpt-5.6-luna": (0.20, 1.20),
+    "gpt-5.6-luna-pro": (0.20, 1.20),
+    "gpt-luna-latest": (0.10, 0.50),
     "gpt-4o-mini": (0.15, 0.60),
     "gpt-4.1-mini": (0.40, 1.60),
     "gpt-4.1-nano": (0.10, 0.40),
